@@ -91,6 +91,44 @@ $ErrorActionPreference = 'Continue'
       </Setter>
     </Style>
 
+    <!-- Interruptor de algo que YA está aplicado/instalado: encendido en verde y bloqueado -->
+    <Style x:Key="SwitchDone" TargetType="CheckBox">
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="CheckBox">
+            <Grid Width="44" Height="24" Background="Transparent">
+              <Border CornerRadius="12" Background="#2634D399" BorderBrush="#6634D399" BorderThickness="1"/>
+              <Ellipse Width="18" Height="18" Fill="#34D399" HorizontalAlignment="Right" Margin="0,0,3,0"/>
+            </Grid>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- Interruptor de algo aplicado que SÍ se puede deshacer: verde encendido; al apagarlo queda gris -->
+    <Style x:Key="SwitchApplied" TargetType="CheckBox">
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="CheckBox">
+            <Grid Width="44" Height="24" Background="Transparent">
+              <Border x:Name="Track" CornerRadius="12" Background="#262C3B" BorderBrush="#FBBF24" BorderThickness="1"/>
+              <Ellipse x:Name="Knob" Width="18" Height="18" Fill="#AAB3C5" HorizontalAlignment="Left" Margin="3,0,0,0"/>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="Track" Property="Background" Value="#2634D399"/>
+                <Setter TargetName="Track" Property="BorderBrush" Value="#6634D399"/>
+                <Setter TargetName="Knob" Property="HorizontalAlignment" Value="Right"/>
+                <Setter TargetName="Knob" Property="Margin" Value="0,0,3,0"/>
+                <Setter TargetName="Knob" Property="Fill" Value="#34D399"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
     <Style x:Key="Nav" TargetType="RadioButton">
       <Setter Property="Foreground" Value="#8A93A6"/>
       <Setter Property="Cursor" Value="Hand"/>
@@ -499,6 +537,11 @@ function Add-Log($msg, $color = 'Gray') {
         $t = New-Text $line.Trim() 11.5 $col
         $t.FontFamily = 'Consolas'; $t.Margin = '0,1'
         [void]$ui.LogPanel.Children.Add($t)
+        # recuento para el resumen final (ventana de reinicio)
+        $tl = $line.Trim()
+        if ($tl -match '^(OK|DESHECHO|RESTAURADO)\b') { $script:RunOk++ }
+        elseif ($tl -match '^FALLO') { $script:RunFail++ }
+        if ($tl -match 'pide reiniciar') { $script:RunNeedsReboot = $true }
         if ($line -match 'OK|FALLO|RESTAURADO|Liberado|apagada|Copia|Instalando|YA ESTABA|terminada') { $ui.StatusText.Text = $line.Trim() }
     }
     $ui.LogScroll.ScrollToEnd()
@@ -592,8 +635,9 @@ function New-Row($it) {
 
     $row = @{ Item = $it; Card = $card; Chk = $chk; Pill = $pill; Status = 'scan' }
     $card.Tag = $chk
-    $chk.add_Checked({ Update-Selection })
-    $chk.add_Unchecked({ Update-Selection })
+    $chk.Tag = $row
+    $chk.add_Checked({ param($s, $e) Update-UndoPill $s.Tag; Update-Selection })
+    $chk.add_Unchecked({ param($s, $e) Update-UndoPill $s.Tag; Update-Selection })
     # clic en cualquier parte de la tarjeta = mover el interruptor
     $card.add_MouseLeftButtonUp({
         param($s, $e)
@@ -603,19 +647,56 @@ function New-Row($it) {
     $row
 }
 
-function Set-RowStatus($row, $status) {
-    $row.Status = $status
-    $label, $bg, $fg, $op = switch ($status) {
-        'pending' { 'PENDIENTE', '#26FBBF24', '#FBBF24', 1.0 }
-        'done'    { 'APLICADO',  '#2234D399', '#34D399', 0.7 }
-        'na'      { 'NO EXISTE', '#1A8A93A6', '#6B7488', 0.4 }
-    }
+# Interruptor verde fijo = ya hecho; normal = se puede elegir.
+function Set-SwitchLook($chk, [bool]$done, $doneTip) {
+    $chk.Style = $Win.FindResource($(if ($done) { 'SwitchDone' } else { 'Switch' }))
+    $chk.ToolTip = if ($done) { $doneTip } else { $null }
+    # el ToolTip de un control deshabilitado solo aparece con esto
+    [Windows.Controls.ToolTipService]::SetShowOnDisabled($chk, $true)
+}
+
+function Set-Pill($row, $label, $bg, $fg) {
     $row.Pill.Background = Brush $bg
     $row.Pill.Child.Text = $label
     $row.Pill.Child.Foreground = Brush $fg
-    $row.Card.Opacity = $op
+}
+
+# Estados: pending (sin aplicar) · donerev (aplicado por OptiXeo, se puede deshacer)
+#          done (ya estaba así antes: no hay copia de su valor original) · na (no existe)
+function Set-RowStatus($row, $status) {
+    $row.Status = $status
+    switch ($status) {
+        'pending' { Set-Pill $row 'PENDIENTE' '#26FBBF24' '#FBBF24'; $row.Card.Opacity = 1.0 }
+        'done'    { Set-Pill $row 'APLICADO'  '#2234D399' '#34D399'; $row.Card.Opacity = 0.9 }
+        'donerev' { $row.Card.Opacity = 1.0 }
+        'na'      { Set-Pill $row 'NO EXISTE' '#1A8A93A6' '#6B7488'; $row.Card.Opacity = 0.4 }
+    }
+    if ($status -eq 'donerev') {
+        $row.Chk.Style = $Win.FindResource('SwitchApplied')
+        $row.Chk.ToolTip = 'Aplicado. Apágalo y pulsa Aplicar para deshacer solo este ajuste.'
+        $row.Chk.IsEnabled = $true
+        $row.Chk.IsChecked = $true
+        Update-UndoPill $row
+        return
+    }
     $row.Chk.IsEnabled = ($status -eq 'pending')
-    if ($status -ne 'pending') { $row.Chk.IsChecked = $false }
+    $row.Chk.IsChecked = $false
+    Set-SwitchLook $row.Chk ($status -eq 'done') 'Ya estaba así antes de usar OptiXeo: no hay copia de su valor original para deshacerlo.'
+}
+
+# En un ajuste aplicado, apagar el interruptor = "se deshará"
+function Update-UndoPill($row) {
+    if (-not $row -or $row.Status -ne 'donerev') { return }
+    if ($row.Chk.IsChecked) { Set-Pill $row 'APLICADO' '#2234D399' '#34D399' }
+    else { Set-Pill $row 'SE DESHARÁ' '#26FBBF24' '#FBBF24' }
+}
+
+# Lo que cambiaría al pulsar Aplicar: pendientes encendidos + aplicados apagados.
+function Get-TweakChanges {
+    @{
+        Apply = @($script:Rows | Where-Object { $_.Status -eq 'pending' -and $_.Chk.IsChecked })
+        Undo  = @($script:Rows | Where-Object { $_.Status -eq 'donerev' -and -not $_.Chk.IsChecked })
+    }
 }
 
 foreach ($cat in $CatInfo.Keys) {
@@ -724,7 +805,7 @@ function Set-AppStatus($row, $status) {
     $label, $bg, $fg, $op = switch ($status) {
         'missing'   { 'NO INSTALADO', '#2222D3EE', '#22D3EE', 1.0 }
         'partial'   { 'FALTA PARTE',  '#26FBBF24', '#FBBF24', 1.0 }
-        'installed' { 'INSTALADO',    '#2234D399', '#34D399', 0.7 }
+        'installed' { 'INSTALADO',    '#2234D399', '#34D399', 0.9 }
         'nowinget'  { 'SIN WINGET',   '#26F87171', '#F87171', 0.5 }
     }
     $row.Pill.Background = Brush $bg
@@ -733,6 +814,7 @@ function Set-AppStatus($row, $status) {
     $row.Card.Opacity = $op
     $row.Chk.IsEnabled = ($status -in 'missing', 'partial')
     if (-not $row.Chk.IsEnabled) { $row.Chk.IsChecked = $false }
+    Set-SwitchLook $row.Chk ($status -eq 'installed') 'Ya está instalado en este PC.'
 }
 
 # ============================================================================
@@ -894,12 +976,13 @@ function Update-Summary {
     $visible = @($script:Rows | Where-Object { $script:Filter -eq 'Todo' -or $_.Item.Cat -eq $script:Filter })
     if (-not $tweaksReady) { $ui.HdrSub.Text = 'Analizando tu PC...'; return }
     $p = @($visible | Where-Object Status -eq 'pending').Count
-    $d = @($visible | Where-Object Status -eq 'done').Count
+    $d = @($visible | Where-Object { $_.Status -in 'done', 'donerev' }).Count
     $ui.HdrSub.Text = "$p pendientes  ·  $d aplicados  ·  $($visible.Count) en total"
 }
 
 function Update-Selection {
-    $n = @(Get-ModeRows | Where-Object { $_.Chk.IsChecked -and $_.Chk.IsEnabled }).Count
+    if ($script:Mode -eq 'tweaks') { $c = Get-TweakChanges; $n = $c.Apply.Count + $c.Undo.Count }
+    else { $n = @(Get-ModeRows | Where-Object { $_.Chk.IsChecked -and $_.Chk.IsEnabled }).Count }
     $ui.BtnApply.Content = switch ($script:Mode) {
         'apps'    { if ($n -eq 1) { 'Instalar 1 programa' } elseif ($n) { "Instalar $n programas" } else { 'Nada seleccionado' } }
         'drivers' { if ($n -eq 1) { 'Instalar 1 driver' }  elseif ($n) { "Instalar $n drivers" }  else { 'Nada seleccionado' } }
@@ -940,7 +1023,8 @@ function Update-Ram {
 # ============================================================================
 #  DIÁLOGO
 # ============================================================================
-function Show-Dialog($title, $body, $okText = 'Aceptar', [switch]$NoCancel) {
+function Show-Dialog($title, $body, $okText = 'Aceptar', [switch]$NoCancel, $CancelText = 'Cancelar') {
+    $ui.DlgCancel.Content = $CancelText
     $ui.DlgTitle.Text = $title
     $ui.DlgBody.Content = if ($body -is [string]) { New-Text $body 13 '#C9D1E0' } else { $body }
     $ui.DlgOk.Content = $okText
@@ -969,17 +1053,25 @@ $WorkerScript = {
         $script:LogSink = { param($m, $c) $Q.Enqueue(@{ Msg = [string]$m; Color = [string]$c }) }
         switch ($Kind) {
             'scan' {
+                $idx = Get-BackupIndex
                 $res = foreach ($it in $Arg) {
                     try {
                         $ok = Test-Applied $it (Get-State $it)
-                        if ($null -eq $ok) { 'na' } elseif ($ok) { 'done' } else { 'pending' }
+                        if ($null -eq $ok) { 'na' }
+                        elseif ($ok) { if ($idx.ContainsKey((Get-ItemKey $it))) { 'donerev' } else { 'done' } }
+                        else { 'pending' }
                     } catch { 'na' }
                 }
                 $Q.Enqueue(@{ Scan = @($res) })
             }
             'apply' {
-                $todo = @(Get-Pending $Arg)
-                if ($todo) { Invoke-Changes $todo { $Q.Enqueue(@{ Step = $true }) } } else { Say 'Nada que cambiar.' Green }
+                # $Arg = @{ Apply = ajustes a aplicar; Undo = @{Obj;Before} a deshacer }
+                if ($Arg.Undo) { Undo-Items $Arg.Undo { $Q.Enqueue(@{ Step = $true }) } }
+                if ($Arg.Apply) {
+                    $todo = @(Get-Pending $Arg.Apply)
+                    if ($todo) { Invoke-Changes $todo { $Q.Enqueue(@{ Step = $true }) } }
+                }
+                if (-not $Arg.Undo -and -not $Arg.Apply) { Say 'Nada que cambiar.' Green }
             }
             'restore' { Restore-Backup $Arg { $Q.Enqueue(@{ Step = $true }) } }
             'appscan' {
@@ -1010,9 +1102,63 @@ function Set-Busy($on, $text) {
     Update-Selection
 }
 
+function Show-RebootPrompt {
+    $ok = [int]$script:RunOk; $fail = [int]$script:RunFail
+    if ($ok -eq 0) { return }   # no cambió nada: no hace falta reiniciar
+
+    $grid = New-Object Windows.Controls.Grid
+    foreach ($w in 'Auto', '*') {
+        $cd = New-Object Windows.Controls.ColumnDefinition
+        $cd.Width = (New-Object Windows.GridLengthConverter).ConvertFromString($w)
+        [void]$grid.ColumnDefinitions.Add($cd)
+    }
+    $circle = New-Object Windows.Controls.Border
+    $circle.Width = 60; $circle.Height = 60; $circle.CornerRadius = 30
+    $circle.Background = $Win.FindResource('AccentGrad'); $circle.Margin = '0,2,18,0'; $circle.VerticalAlignment = 'Top'
+    $glyph = New-Object Windows.Controls.TextBlock
+    $glyph.Text = [string][char]0xE777; $glyph.FontFamily = 'Segoe MDL2 Assets'; $glyph.FontSize = 26
+    $glyph.Foreground = Brush '#FFFFFF'; $glyph.HorizontalAlignment = 'Center'; $glyph.VerticalAlignment = 'Center'
+    $circle.Child = $glyph
+    [void]$grid.Children.Add($circle)
+
+    $right = New-Object Windows.Controls.StackPanel
+    [Windows.Controls.Grid]::SetColumn($right, 1)
+    $pills = New-Object Windows.Controls.WrapPanel
+    $okLabel = if ($ok -eq 1) { '1 cambio correcto' } else { "$ok cambios correctos" }
+    $p1 = New-Pill ([string][char]0x2713 + '  ' + $okLabel.ToUpper()) '#2234D399' '#34D399'
+    $p1.Margin = '0,0,6,0'
+    [void]$pills.Children.Add($p1)
+    if ($fail) { [void]$pills.Children.Add((New-Pill ([string][char]0x2715 + "  $fail CON ERROR (mira el registro)") '#26F87171' '#F87171')) }
+    [void]$right.Children.Add($pills)
+
+    $why = switch ($script:RunKind) {
+        'install'       { 'Algunas librerías, como Visual C++, piden reiniciar para quedar listas.' }
+        'driverinstall' { 'Los drivers nuevos se cargan al reiniciar.' }
+        default         { 'Los servicios, las apps y las características de Windows terminan de aplicarse al reiniciar. Hasta entonces, algunos cambios pueden no notarse.' }
+    }
+    $t1 = New-Text $why 13 '#C9D1E0'
+    $t1.Margin = '0,12,0,0'
+    [void]$right.Children.Add($t1)
+    $t2 = New-Text 'Guarda lo que tengas abierto antes de reiniciar.' 12 '#8A93A6'
+    $t2.Margin = '0,8,0,0'
+    [void]$right.Children.Add($t2)
+    [void]$grid.Children.Add($right)
+
+    if (Show-Dialog 'Listo · se recomienda reiniciar' $grid 'Reiniciar ahora' -CancelText 'Más tarde') {
+        Restart-Computer -Force
+    } else {
+        $ui.BtnReboot.Content = 'Reiniciar PC  ·  pendiente'
+        $ui.BtnReboot.Foreground = Brush '#FBBF24'
+        $ui.StatusText.Text = 'Reinicio pendiente: puedes hacerlo cuando quieras desde Herramientas'
+    }
+}
+
 function Start-Work($kind, $arg, $text, $steps = 0) {
     if ($script:Busy) { return }
     $script:Kind = $kind
+    if ($kind -in 'apply', 'restore', 'install', 'driverinstall') {
+        $script:RunKind = $kind; $script:RunOk = 0; $script:RunFail = 0; $script:RunNeedsReboot = $false
+    }
     $ui.Progress.IsIndeterminate = ($steps -eq 0)
     $ui.Progress.Maximum = [math]::Max($steps, 1); $ui.Progress.Value = 0
     Set-Busy $true $text
@@ -1041,16 +1187,25 @@ function Complete-Work {
         $script:AppScanDone = $true
         $ui.StatusText.Text = 'Análisis completo'
     } elseif ($kind -in 'apply', 'restore') {
+        $script:RebootPromptPending = $true
         Start-Work 'scan' $script:AllItems 'Comprobando el resultado...'
     } elseif ($kind -eq 'install') {
+        if ($script:RunNeedsReboot) { $script:RebootPromptPending = $true }
         Start-Work 'appscan' $AppCatalog 'Comprobando lo instalado...'
     } elseif ($kind -eq 'driverscan') {
         $ui.StatusText.Text = 'Análisis de drivers completo'
     } elseif ($kind -eq 'driverinstall') {
+        $script:RebootPromptPending = $true
         $script:DriverScanDone = $false
         Start-Work 'driverscan' $null 'Re-analizando drivers...'
     }
     if ($script:DriverScanWanted -and -not $script:Busy) { $script:DriverScanWanted = $false; Ensure-DriverScan }
+    # la ventana de reinicio sale cuando ya terminó el re-análisis (así detrás se ve todo actualizado)
+    if ($script:RebootPromptPending -and -not $script:Busy) {
+        $script:RebootPromptPending = $false
+        # fuera del tick del temporizador, para no abrir el diálogo dentro de él
+        [void]$Win.Dispatcher.BeginInvoke([action]{ Show-RebootPrompt })
+    }
     Update-Ram
 }
 
@@ -1098,10 +1253,17 @@ $ui.BtnRec.add_Click({
     } elseif ($script:Mode -eq 'drivers') {
         foreach ($r in $script:DriverRows) { if ($r.Chk.IsEnabled) { $r.Chk.IsChecked = $true } }
     } else {
-        foreach ($r in $script:Rows) { if ($r.Chk.IsEnabled) { $r.Chk.IsChecked = [bool]$r.Item.Rec } }
+        # solo los pendientes: los ya aplicados no se tocan (apagarlos = deshacer)
+        foreach ($r in $script:Rows) { if ($r.Status -eq 'pending') { $r.Chk.IsChecked = [bool]$r.Item.Rec } }
     }
 })
-$ui.BtnNone.add_Click({ foreach ($r in (Get-ModeRows)) { $r.Chk.IsChecked = $false } })
+$ui.BtnNone.add_Click({
+    foreach ($r in (Get-ModeRows)) {
+        if ($r.Status -eq 'pending') { $r.Chk.IsChecked = $false }       # ajustes sin aplicar
+        elseif ($r.Status -eq 'donerev') { $r.Chk.IsChecked = $true }    # cancela los "se deshará"
+        elseif ($script:Mode -ne 'tweaks') { $r.Chk.IsChecked = $false } # programas / drivers
+    }
+})
 
 function Request-Install {
     $sel = @($script:AppRows | Where-Object { $_.Chk.IsChecked -and $_.Chk.IsEnabled })
@@ -1124,22 +1286,43 @@ function Request-Install {
 $ui.BtnApply.add_Click({
     if ($script:Mode -eq 'apps') { Request-Install; return }
     if ($script:Mode -eq 'drivers') { Request-DriverInstall; return }
-    $sel = @($script:Rows | Where-Object { $_.Chk.IsChecked -and $_.Chk.IsEnabled })
-    if (-not $sel) { return }
+    $c = Get-TweakChanges
+    $total = $c.Apply.Count + $c.Undo.Count
+    if (-not $total) { return }
+
+    # estado anterior de cada ajuste a deshacer, sacado de las copias
+    $undo = @()
+    if ($c.Undo.Count) {
+        $idx = Get-BackupIndex
+        $undo = @(foreach ($r in $c.Undo) {
+            $before = $idx[(Get-ItemKey $r.Item)]
+            if ($before) { @{ Obj = $r.Item; Before = $before } }
+        })
+    }
+
     $body = New-Object Windows.Controls.StackPanel
-    [void]$body.Children.Add((New-Text 'Antes se crea un punto de restauración y una copia de cada valor. Con "Restaurar copia" lo deshaces cuando quieras.' 13 '#C9D1E0'))
+    $intro = if ($c.Apply.Count) { 'Antes de aplicar se crea un punto de restauración y una copia de cada valor.' } else { 'Cada ajuste vuelve al valor que tenía antes de que OptiXeo lo cambiara.' }
+    [void]$body.Children.Add((New-Text $intro 13 '#C9D1E0'))
     $sv = New-Object Windows.Controls.ScrollViewer
-    $sv.MaxHeight = 220; $sv.Margin = '0,14,0,0'; $sv.VerticalScrollBarVisibility = 'Auto'
+    $sv.MaxHeight = 240; $sv.Margin = '0,10,0,0'; $sv.VerticalScrollBarVisibility = 'Auto'
     $list = New-Object Windows.Controls.StackPanel
-    foreach ($r in $sel) {
-        $t = New-Text ('•  ' + (Split-Why $r.Item.Why)[0]) 12.5 '#E8ECF4'
-        $t.Margin = '0,2'
-        [void]$list.Children.Add($t)
+    foreach ($grp in @(@('SE APLICARÁ', $c.Apply, '#22D3EE'), @('SE DESHARÁ', $c.Undo, '#FBBF24'))) {
+        if (-not $grp[1].Count) { continue }
+        $h = New-Text $grp[0] 10.5 $grp[2] 'SemiBold'
+        $h.Margin = '0,8,0,4'
+        [void]$list.Children.Add($h)
+        foreach ($r in $grp[1]) {
+            $t = New-Text ('•  ' + (Split-Why $r.Item.Why)[0]) 12.5 '#E8ECF4'
+            $t.Margin = '0,2'
+            [void]$list.Children.Add($t)
+        }
     }
     $sv.Content = $list
     [void]$body.Children.Add($sv)
-    if (Show-Dialog "Aplicar $($sel.Count) cambios" $body 'Aplicar ahora') {
-        Start-Work 'apply' @($sel | ForEach-Object { $_.Item }) 'Aplicando cambios...' $sel.Count
+    $title = if ($total -eq 1) { '1 cambio' } else { "$total cambios" }
+    if (Show-Dialog $title $body 'Confirmar') {
+        $arg = @{ Apply = @($c.Apply | ForEach-Object { $_.Item }); Undo = $undo }
+        Start-Work 'apply' $arg 'Aplicando cambios...' $total
     }
 })
 

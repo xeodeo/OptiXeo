@@ -413,12 +413,48 @@ function Invoke-Restore {
     Restore-Backup $f.FullName
 }
 
+# ConvertFrom-Json devuelve PSCustomObject; se pasa a hashtable para reutilizar las funciones
+function ConvertTo-Hashtable($obj) {
+    $h = @{}
+    $obj.PSObject.Properties | ForEach-Object { $h[$_.Name] = $_.Value }
+    $h
+}
+
+# Identifica un ajuste igual en el catálogo y en las copias.
+function Get-ItemKey($it) { '{0}|{1}|{2}|{3}' -f $it.Type, $it.Path, $it.Hive, $it.Name }
+
+# clave del ajuste -> estado que tenía antes de que OptiXeo lo cambiara (la copia más reciente gana)
+function Get-BackupIndex {
+    $idx = @{}
+    foreach ($f in (Get-Backups | Sort-Object Name)) {
+        try { $entries = Get-Content $f.FullName -Raw | ConvertFrom-Json } catch { continue }
+        foreach ($e in @($entries)) {
+            $idx[(Get-ItemKey (ConvertTo-Hashtable $e.Obj))] = ConvertTo-Hashtable $e.Before
+        }
+    }
+    $idx
+}
+
+# Deshace ajustes sueltos: lista de @{ Obj = ajuste; Before = estado guardado en la copia }.
+function Undo-Items($list, [scriptblock]$OnStep) {
+    foreach ($u in $list) {
+        try {
+            Restore-Optimization $u.Obj $u.Before
+            Say "  DESHECHO $(Get-Label $u.Obj)" Green
+            Write-Log "DESHECHO $(Get-Label $u.Obj)"
+        } catch {
+            Say "  FALLO al deshacer $(Get-Label $u.Obj): $($_.Exception.Message)" Red
+            Write-Log "FALLO al deshacer $(Get-Label $u.Obj): $($_.Exception.Message)"
+        }
+        if ($OnStep) { & $OnStep }
+    }
+}
+
 function Restore-Backup($path, [scriptblock]$OnStep) {
     $entries = Get-Content $path -Raw | ConvertFrom-Json
     foreach ($e in @($entries)) {
-        # ConvertFrom-Json devuelve PSCustomObject; se pasa a hashtable para reutilizar las funciones
-        $it = @{}; $e.Obj.PSObject.Properties | ForEach-Object { $it[$_.Name] = $_.Value }
-        $st = @{}; $e.Before.PSObject.Properties | ForEach-Object { $st[$_.Name] = $_.Value }
+        $it = ConvertTo-Hashtable $e.Obj
+        $st = ConvertTo-Hashtable $e.Before
         try {
             Restore-Optimization $it $st
             Say "  RESTAURADO $(Get-Label $it)" Green
