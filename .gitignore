@@ -1,0 +1,22 @@
+# --- Binarios / instaladores de terceros (no se suben) ---
+*.exe
+*.msi
+*.cab
+
+# --- Datos locales de la maquina ---
+backups/
+*.log
+*.bak_*
+*.csv
+
+# --- Herramientas de analisis y temporales ---
+tools/
+out/
+*.tmp
+
+# --- Carpetas redundantes (drivers ya integrados en la GUI) ---
+XeoDrivers/
+XeoDrivers-repo/
+
+# --- Configuracion personal de Claude Code / skills (no va al repo publico) ---
+.claude/
